@@ -1,65 +1,101 @@
-import streamlit as st
-import chromadb
-from google import genai
 import os
+import langchain
+import streamlit as st
 from dotenv import load_dotenv
+
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_chroma import Chroma
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_classic import hub
+
+# ----------------- CONFIG -----------------
+st.set_page_config(page_title="PDF RAG App", layout="wide")
+st.title("📄 Placement PDF Q&A App")
 
 load_dotenv()
 
-def get_vector_db(db_path="./my_notes_db"):
-    client = chromadb.PersistentClient(path=db_path)
-    return client.get_or_create_collection(name="personal_notes")
+# ----------------- LOAD MODEL -----------------
+@st.cache_resource
+def load_models():
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 
-def run_manual_rag(user_query, _collection, _genai_client):
-    
-    results = _collection.query(query_texts=[user_query], n_results=1)
-    
-    if not results['documents'] or not results['documents'][0]:
-        return "I couldn't find any relevant notes in your database."
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        temperature=0
+    )
 
-    retrieved_context = results['documents'][0][0]
+    return embeddings, llm
 
-    prompt = f"""
-    Answer the question based ONLY on the context below. 
-    If you don't know, say "I don't have this in my notes."
 
-    CONTEXT: {retrieved_context}
-    QUESTION: {user_query}
-    """
-    try:
-        response = _genai_client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt
-        )
-        return response.text
-    except Exception as e:
-        return f"Error: {str(e)}"
+# ----------------- LOAD & EMBED PDF -----------------
+@st.cache_resource
+def create_vectorstore(pdf_path):
+    loader = PyPDFLoader(pdf_path, extract_images=True)
+    docs = loader.load()
 
-def main():
-    st.set_page_config(page_title="My AI Notes", page_icon="📝")
-    st.title("My Private Note Assistant")
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=25,
+        chunk_overlap=15
+    )
+    splits = text_splitter.split_documents(docs)
 
-    collection = get_vector_db()
-    genai_client = genai.Client()
+    vectorstore = Chroma.from_documents(
+        documents=splits,
+        embedding=embeddings,
+        persist_directory="./chroma_db"
+    )
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    return vectorstore
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
 
-    if user_input := st.chat_input("Ask me about your notes..."):
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
+embeddings, llm = load_models()
 
-        with st.chat_message("assistant"):
-            with st.spinner("Searching your memory..."):
-                answer = run_manual_rag(user_input, collection, genai_client)
-                st.markdown(answer)
-        
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+# ----------------- SIDEBAR -----------------
+st.sidebar.header("📂 PDF Settings")
 
-if __name__ == "__main__":
-    main()
+pdf_file = st.sidebar.file_uploader(
+    "Upload Placement PDF",
+    type=["pdf"]
+)
+
+if pdf_file:
+    pdf_path = f"temp_{pdf_file.name}"
+    with open(pdf_path, "wb") as f:
+        f.write(pdf_file.read())
+
+    st.sidebar.success("PDF uploaded successfully!")
+
+    vectorstore = create_vectorstore(pdf_path)
+
+    prompt = hub.pull("langchain-ai/retrieval-qa-chat")
+    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+
+    rag_chain = create_retrieval_chain(
+        vectorstore.as_retriever(),
+        combine_docs_chain
+    )
+
+    # ----------------- CHAT UI -----------------
+    st.subheader("💬 Ask Questions")
+
+    user_question = st.text_input(
+        "Enter your question",
+        placeholder="What are the main points of this document?"
+    )
+
+    if st.button("Ask"):
+        if user_question.strip():
+            with st.spinner("Thinking..."):
+                response = rag_chain.invoke({"input": user_question})
+                st.markdown("### ✅ Answer")
+                st.write(response["answer"])
+        else:
+            st.warning("Please enter a question.")
+else:
+    st.info("Upload a PDF to start asking questions.")
