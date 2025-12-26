@@ -1,6 +1,6 @@
 import os
-import langchain
 import streamlit as st
+import tempfile
 from dotenv import load_dotenv
 
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -11,91 +11,73 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_classic import hub
-
-# ----------------- CONFIG -----------------
-st.set_page_config(page_title="PDF RAG App", layout="wide")
-st.title("📄 Placement PDF Q&A App")
-
 load_dotenv()
 
-# ----------------- LOAD MODEL -----------------
-@st.cache_resource
-def load_models():
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        temperature=0
-    )
+st.set_page_config(page_title="sample app", layout="wide")
+st.title("answer questions from PDF with Gemini")
+st.write("Upload any PDF and ask questions from it")
 
-    return embeddings, llm
+uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
 
+if uploaded_file:
+    with st.spinner("Processing PDF..."):
 
-# ----------------- LOAD & EMBED PDF -----------------
-@st.cache_resource
-def create_vectorstore(pdf_path):
-    loader = PyPDFLoader(pdf_path, extract_images=True)
-    docs = loader.load()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            pdf_path = tmp_file.name
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=25,
-        chunk_overlap=15
-    )
-    splits = text_splitter.split_documents(docs)
+        loader = PyPDFLoader(pdf_path, extract_images=True)
+        docs = loader.load()
 
-    vectorstore = Chroma.from_documents(
-        documents=splits,
-        embedding=embeddings,
-        persist_directory="./chroma_db"
-    )
+        if len(docs) == 0:
+            st.error(" No text found in the PDF")
+            st.stop()
 
-    return vectorstore
+        st.success(f" Loaded {len(docs)} pages")
 
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", " ", ""]
+        )
+        splits = text_splitter.split_documents(docs)
 
-embeddings, llm = load_models()
+        st.write(f" Created {len(splits)} chunks")
 
-# ----------------- SIDEBAR -----------------
-st.sidebar.header("📂 PDF Settings")
+        if len(splits) == 0:
+            st.error("No chunks created")
+            st.stop()
 
-pdf_file = st.sidebar.file_uploader(
-    "Upload Placement PDF",
-    type=["pdf"]
-)
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
 
-if pdf_file:
-    pdf_path = f"temp_{pdf_file.name}"
-    with open(pdf_path, "wb") as f:
-        f.write(pdf_file.read())
+        vectorstore = Chroma.from_documents(
+            documents=splits,
+            embedding=embeddings,
+            persist_directory="./chroma_db"
+        )
 
-    st.sidebar.success("PDF uploaded successfully!")
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            temperature=0
+        )
 
-    vectorstore = create_vectorstore(pdf_path)
+        prompt = hub.pull("langchain-ai/retrieval-qa-chat")
+        combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+        rag_chain = create_retrieval_chain(
+            vectorstore.as_retriever(),
+            combine_docs_chain
+        )
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
-    prompt = hub.pull("langchain-ai/retrieval-qa-chat")
-    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+        st.success(" RAG system ready!")
 
-    rag_chain = create_retrieval_chain(
-        vectorstore.as_retriever(),
-        combine_docs_chain
-    )
+    query = st.text_input("Ask a question from the PDF")
 
-    # ----------------- CHAT UI -----------------
-    st.subheader("💬 Ask Questions")
-
-    user_question = st.text_input(
-        "Enter your question",
-        placeholder="What are the main points of this document?"
-    )
-
-    if st.button("Ask"):
-        if user_question.strip():
-            with st.spinner("Thinking..."):
-                response = rag_chain.invoke({"input": user_question})
-                st.markdown("### ✅ Answer")
-                st.write(response["answer"])
-        else:
-            st.warning("Please enter a question.")
-else:
-    st.info("Upload a PDF to start asking questions.")
+    if query:
+        with st.spinner("Generating answer..."):
+            response = rag_chain.invoke({"input": query})
+            st.subheader(" Answer")
+            st.write(response["answer"])
