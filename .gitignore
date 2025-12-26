@@ -1,11 +1,15 @@
 
+.venv
 chroma_db/
 chroma_db_gemini/
 *.sqlite3
+
 temp_*.pdf
 __pycache__/
 *.py[cod]
 *$py.class
+
 my_notes_db/
 .DS_Store
 Thumbs.db
+.env
