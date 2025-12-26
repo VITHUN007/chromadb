@@ -1,5 +1,11 @@
-.env
+
 chroma_db/
 chroma_db_gemini/
+*.sqlite3
+temp_*.pdf
+__pycache__/
+*.py[cod]
+*$py.class
 my_notes_db/
-iNVOICE_*.pdf
+.DS_Store
+Thumbs.db
