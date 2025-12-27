@@ -1,0 +1,19 @@
+# UI Framework
+streamlit
+
+# LangChain Core and Integrations
+langchain
+langchain-community
+langchain-huggingface
+langchain-google-genai
+langchain-chroma
+langchainhub
+
+# Document Processing
+pypdf
+
+# Embeddings and Vector DB
+sentence-transformers
+chromadb
+
+python-dotenv

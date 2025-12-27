@@ -41,6 +41,7 @@ if uploaded_file:
             chunk_overlap=200,
             separators=["\n\n", "\n", " ", ""]
         )
+
         splits = text_splitter.split_documents(docs)
 
         st.write(f" Created {len(splits)} chunks")
@@ -70,7 +71,7 @@ if uploaded_file:
             vectorstore.as_retriever(),
             combine_docs_chain
         )
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
 
         st.success(" RAG system ready!")
 
@@ -81,3 +82,16 @@ if uploaded_file:
             response = rag_chain.invoke({"input": query})
             st.subheader(" Answer")
             st.write(response["answer"])
+            st.divider()
+        st.subheader("Source Chunks & Similarity Scores")
+        
+        docs_with_scores = vectorstore.similarity_search_with_score(query, k=1)
+
+        for i, (doc, score) in enumerate(docs_with_scores):
+            with st.expander(f"Source {i+1} | Distance: {score:.4f}"):
+                st.write(f"**Content:** {doc.page_content}")
+                st.json(doc.metadata) 
+    
+# 0.0 - 0.6	High Similarity: The chunk is very likely relevant to your question.
+# 0.7 - 1.2	Moderate Similarity: The chunk may be somewhat relevant to your question."
+# 1.3+	Low Similarity: The chunk is likely irrelevant to your question.
