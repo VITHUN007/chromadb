@@ -10,7 +10,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-from langchain_classic import hub
+from langchain_core.prompts import ChatPromptTemplate
 load_dotenv()
 
 
@@ -65,7 +65,18 @@ if uploaded_file:
             temperature=0
         )
 
-        prompt = hub.pull("langchain-ai/retrieval-qa-chat")
+        system_prompt=("You are an assistant for question-answering tasks. "
+    "Use the following pieces of retrieved context to answer the question: "
+    "\n\n"
+    "{context}"
+    "\n\n"
+    "If you don't know the answer, just say that you don't know.")
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("human", "{input}")
+        ])
+        
         combine_docs_chain = create_stuff_documents_chain(llm, prompt)
         rag_chain = create_retrieval_chain(
             vectorstore.as_retriever(),
