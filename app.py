@@ -1,6 +1,7 @@
 import os
-import streamlit as st
+import shutil
 import tempfile
+import streamlit as st
 from dotenv import load_dotenv
 
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -11,98 +12,112 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_classic.chains import create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
+
 load_dotenv()
+DB_DIR = "./chroma_db"
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
+st.set_page_config(page_title="PDF AI", layout="wide")
 
-st.set_page_config(page_title="sample app", layout="wide")
-st.title("answer questions from PDF with Gemini")
-st.write("Upload any PDF and ask questions from it")
+@st.cache_resource
+def load_embeddings():
+    return HuggingFaceEmbeddings(model_name=EMBED_MODEL)
 
-uploaded_file = st.file_uploader("Upload a PDF file", type=["pdf"])
+def clear_vdb():
+    if "vectorstore" in st.session_state:
+        st.session_state.vectorstore = None
+    if os.path.exists(DB_DIR):
+        try:
+            shutil.rmtree(DB_DIR)
+            st.sidebar.success("Database wiped.")
+        except PermissionError:
+            st.sidebar.error("File locked! Close any applications using the database files and try again.")
+    st.rerun()
 
-if uploaded_file:
-    with st.spinner("Processing PDF..."):
+st.title(" sample gemini Assistant")
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-            tmp_file.write(uploaded_file.read())
-            pdf_path = tmp_file.name
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-        loader = PyPDFLoader(pdf_path, extract_images=True)
-        docs = loader.load()
-
-        if len(docs) == 0:
-            st.error(" No text found in the PDF")
-            st.stop()
-
-        st.success(f" Loaded {len(docs)} pages")
-
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            separators=["\n\n", "\n", " ", ""]
+if "vectorstore" not in st.session_state:
+    if os.path.exists(DB_DIR) and os.listdir(DB_DIR):
+        st.session_state.vectorstore = Chroma(
+            persist_directory=DB_DIR, 
+            embedding_function=load_embeddings()
         )
+    else:
+        st.session_state.vectorstore = None
 
-        splits = text_splitter.split_documents(docs)
+with st.sidebar:
+    if st.button("Reset Application"):
+        clear_vdb()
 
-        st.write(f" Created {len(splits)} chunks")
-
-        if len(splits) == 0:
-            st.error("No chunks created")
-            st.stop()
-
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
-
-        vectorstore = Chroma.from_documents(
-            documents=splits,
-            embedding=embeddings,
-            persist_directory="./chroma_db"
-        )
-
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0
-        )
-
-        system_prompt=("You are an assistant for question-answering tasks. "
-    "Use the following pieces of retrieved context to answer the question: "
-    "\n\n"
-    "{context}"
-    "\n\n"
-    "If you don't know the answer, just say that you don't know.")
-
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "{input}")
-        ])
-        
-        combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-        rag_chain = create_retrieval_chain(
-            vectorstore.as_retriever(),
-            combine_docs_chain
-        )
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
-
-        st.success(" RAG system ready!")
-
-    query = st.text_input("Ask a question from the PDF")
-
-    if query:
-        with st.spinner("Generating answer..."):
-            response = rag_chain.invoke({"input": query})
-            st.subheader(" Answer")
-            st.write(response["answer"])
-            st.divider()
-        st.subheader("Source Chunks & Similarity Scores")
-        
-        docs_with_scores = vectorstore.similarity_search_with_score(query, k=1)
-
-        for i, (doc, score) in enumerate(docs_with_scores):
-            with st.expander(f"Source {i+1} | Distance: {score:.4f}"):
-                st.write(f"**Content:** {doc.page_content}")
-                st.json(doc.metadata) 
+if st.session_state.vectorstore is None:
+    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
     
+    if uploaded_file is not None: 
+        with st.spinner("Writing to database..."):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded_file.read())
+                tmp_path = tmp.name
+            
+            try:
+                loader = PyPDFLoader(tmp_path)
+                docs = loader.load()
+                
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+                splits = text_splitter.split_documents(docs)
+                
+                st.session_state.vectorstore = Chroma.from_documents(
+                    documents=splits, 
+                    embedding=load_embeddings(), 
+                    persist_directory=DB_DIR
+                )
+                st.success("Indexing complete!")
+                st.rerun()
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path) 
+
+else:
+    st.info("Database Loaded")
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+
+    query = st.chat_input("Ask about the PDF...")
+    
+    if query:
+        st.session_state.messages.append({"role": "user", "content": query})
+        with st.chat_message("user"):
+            st.markdown(query)
+
+        vdb = st.session_state.vectorstore    
+
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0)
+        prompt = ChatPromptTemplate.from_template("""
+            Answer based only on context:
+            {context}
+            Question: {input}
+        """)
+        
+        chain = create_retrieval_chain(
+            vdb.as_retriever(), 
+            create_stuff_documents_chain(llm, prompt)
+        )
+        response = chain.invoke({"input": query})
+        
+        with st.chat_message("assistant"):
+            st.markdown(response["answer"])
+
+            docs_with_scores = vdb.similarity_search_with_score(query, k=1)
+            st.subheader("Source Scores")
+            for doc, score in docs_with_scores:
+                with st.expander(f"Chunk (Distance: {score:.4f})"):
+                    st.write(doc.page_content)
+
+
 # 0.0 - 0.6	High Similarity: The chunk is very likely relevant to your question.
 # 0.7 - 1.2	Moderate Similarity: The chunk may be somewhat relevant to your question."
 # 1.3+	Low Similarity: The chunk is likely irrelevant to your question.
